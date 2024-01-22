@@ -28,6 +28,9 @@
 #define DATABASE_SECRET "PneOjq0nn3pSMJMVXAlNaMKv3SWbmABhGBMAwtmh"
 
 #define MoistureSensorPin A0
+#define TriggerPin D5
+#define EchoPin D6
+#define Relay D1
 
 FirebaseData fbdo;
 FirebaseAuth auth;
@@ -35,11 +38,16 @@ FirebaseConfig config;
 
 unsigned long dataMillis = 0;
 int count = 0;
+float cm;
+float duration;
 
 
 void setup()
 {
     pinMode(MoistureSensorPin, INPUT);
+    pinMode(EchoPin, INPUT);
+    pinMode(TriggerPin, OUTPUT);
+    pinMode(Relay, OUTPUT);
     Serial.begin(115200);
 
     Serial.print("Connecting to Wi-Fi");
@@ -89,5 +97,22 @@ void loop()
 
         dataMillis = millis();
         Firebase.RTDB.setInt(&fbdo, "/Status/Humidity", msPercent);
+
+        digitalWrite(TriggerPin, LOW);
+        delayMicroseconds(2);
+        digitalWrite(TriggerPin, HIGH);
+        delayMicroseconds(5);
+        digitalWrite(TriggerPin, LOW);
+        duration = pulseIn(EchoPin, HIGH);
+ 
+        cm = microsecondsToCentimeters(duration);
+      Serial.println(cm);
+      digitalWrite(Relay, LOW);
+
     }
+}
+
+float microsecondsToCentimeters(float microseconds)
+{
+  return microseconds / 29 / 2;
 }
