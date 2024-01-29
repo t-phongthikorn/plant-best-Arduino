@@ -37,10 +37,31 @@ FirebaseAuth auth;
 FirebaseConfig config;
 
 unsigned long dataMillis = 0;
+int wateringBatchMillis = 0;
+int wateringBatchWait = 0;
+int isWateringOn = 0;
 int count = 0;
+bool isInstanceWatering;
 float cm;
 float duration;
+float specificHumidity;
+float Humidity;
 
+// Generic catch-all implementation.
+template <typename T_ty> struct TypeInfo { static const char * name; };
+template <typename T_ty> const char * TypeInfo<T_ty>::name = "unknown";
+
+// Handy macro to make querying stuff easier.
+#define TYPE_NAME(var) TypeInfo< typeof(var) >::name
+
+// Handy macro to make defining stuff easier.
+#define MAKE_TYPE_INFO(type)  template <> const char * TypeInfo<type>::name = #type;
+
+// Type-specific implementations.
+MAKE_TYPE_INFO( int )
+MAKE_TYPE_INFO( float )
+MAKE_TYPE_INFO( short )
+MAKE_TYPE_INFO( bool )
 
 void setup()
 {
@@ -84,7 +105,7 @@ void setup()
     String var = "$userId";
     String val = "($userId === auth.uid && auth.token.premium_account === true && auth.token.admin === true)";
     Firebase.RTDB.setReadWriteRules(&fbdo, base_path, var, val, val, DATABASE_SECRET);
-
+    digitalWrite(Relay, HIGH);
 }
 
 void loop()
@@ -92,11 +113,10 @@ void loop()
     if (millis() - dataMillis > 1500 && Firebase.ready())
     {
       int msValue = analogRead(MoistureSensorPin);
-      int msPercent = map(msValue, 0, 1023, 0, 100);
-      Serial.println(msPercent);
+      Humidity = map(msValue, 0, 1023, 0, 100);
 
         dataMillis = millis();
-        Firebase.RTDB.setInt(&fbdo, "/Status/Humidity", msPercent);
+        Firebase.RTDB.setInt(&fbdo, "/Status/Humidity", Humidity);
 
         digitalWrite(TriggerPin, LOW);
         delayMicroseconds(2);
@@ -104,12 +124,45 @@ void loop()
         delayMicroseconds(5);
         digitalWrite(TriggerPin, LOW);
         duration = pulseIn(EchoPin, HIGH);
- 
-        cm = microsecondsToCentimeters(duration);
-      Serial.println(cm);
-      digitalWrite(Relay, LOW);
 
+        Serial.printf("real value %f \n", 8 - microsecondsToCentimeters(duration));
+
+        cm = (8 - microsecondsToCentimeters(duration)) / 4 * 100;
+        Firebase.RTDB.setInt(&fbdo, "/Status/Level", cm);
+
+      Serial.println(cm);
+      specificHumidity = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/Humidity") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      // wateringBatchMillis = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/Humidity") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      wateringBatchWait = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/WateringBatchWait") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      isWateringOn = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/IsEnableWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      isInstanceWatering = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/InstantWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+     
     }
+    if (isWateringOn == 1) {
+      if (Humidity <= specificHumidity) {
+        digitalWrite(Relay, LOW);
+        Serial.println("Watering On");
+        delay(wateringBatchWait * 1000);
+        digitalWrite(Relay, HIGH);
+        Serial.println("Watering Off");
+
+        delay(10 * 1000);
+      }
+      if (isInstanceWatering == 1) {
+        InstanceWatering();
+      }
+    }
+    
+}
+
+void InstanceWatering() {
+    digitalWrite(Relay, LOW);
+    delay(wateringBatchWait * 1000);
+    digitalWrite(Relay, HIGH);
+    isInstanceWatering = 0;
+    Firebase.RTDB.setInt(&fbdo, "/Setting/InstantWatering", 0);
+
+    delay(10 * 1000);
 }
 
 float microsecondsToCentimeters(float microseconds)
