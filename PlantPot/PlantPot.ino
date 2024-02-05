@@ -11,7 +11,7 @@
 #elif __has_include(<WiFiS3.h>)
 #include <WiFiS3.h>
 #endif
-
+#include <math.h>
 #include <Firebase_ESP_Client.h>
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
@@ -37,15 +37,26 @@ FirebaseAuth auth;
 FirebaseConfig config;
 
 unsigned long dataMillis = 0;
-int wateringBatchMillis = 0;
-int wateringBatchWait = 0;
-int isWateringOn = 0;
-int count = 0;
-bool isInstanceWatering;
+
+//Setting
+float targetHumidity = 0.0;
+float wateringBatchDurartion = 0.0; //second
+float wateringBatchDelay = 10.0; //second
+int canWatering = 0;
+int isInstantWatering = 0;
+
+//Status
+float Humidity;
+int isWatering = 0;
+unsigned long pumpMillis; //milli
+unsigned long pumpDelayMillis; //milli
+
+//sensor
 float cm;
 float duration;
-float specificHumidity;
-float Humidity;
+int wet = 275;
+int dry = 610;
+
 
 // Generic catch-all implementation.
 template <typename T_ty> struct TypeInfo { static const char * name; };
@@ -63,6 +74,14 @@ MAKE_TYPE_INFO( float )
 MAKE_TYPE_INFO( short )
 MAKE_TYPE_INFO( bool )
 
+void Watering();
+float ReadWaterLevel();
+void setPumpEnable(bool isEnable);
+float ReadHumidityLevel();
+void StopPumpDelay();
+void stopWatering();
+
+
 void setup()
 {
     pinMode(MoistureSensorPin, INPUT);
@@ -71,6 +90,11 @@ void setup()
     pinMode(Relay, OUTPUT);
     Serial.begin(115200);
 
+    setPumpEnable(false);
+    StopPumpDelay();
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Connecting to Wi-Fi");
     unsigned long ms = millis();
     while (WiFi.status() != WL_CONNECTED)
@@ -105,7 +129,7 @@ void setup()
     String var = "$userId";
     String val = "($userId === auth.uid && auth.token.premium_account === true && auth.token.admin === true)";
     Firebase.RTDB.setReadWriteRules(&fbdo, base_path, var, val, val, DATABASE_SECRET);
-    digitalWrite(Relay, HIGH);
+    
 }
 
 void loop()
@@ -113,10 +137,12 @@ void loop()
     if (millis() - dataMillis > 1500 && Firebase.ready())
     {
       int msValue = analogRead(MoistureSensorPin);
-      Humidity = map(msValue, 0, 1023, 0, 100);
+      Serial.print(msValue);
+      Humidity = map(msValue, wet, dry, 100, 0);
 
         dataMillis = millis();
         Firebase.RTDB.setInt(&fbdo, "/Status/Humidity", Humidity);
+        Firebase.RTDB.setInt(&fbdo, "/Status/IsWatering", isWatering);
 
         digitalWrite(TriggerPin, LOW);
         delayMicroseconds(2);
@@ -125,45 +151,117 @@ void loop()
         digitalWrite(TriggerPin, LOW);
         duration = pulseIn(EchoPin, HIGH);
 
-        Serial.printf("real value %f \n", 8 - microsecondsToCentimeters(duration));
+        Serial.printf("real value %f \n",  microsecondsToCentimeters(duration));
 
-        cm = (8 - microsecondsToCentimeters(duration)) / 4 * 100;
+        cm = round((8 - microsecondsToCentimeters(duration)) / 4 * 100);
         Firebase.RTDB.setInt(&fbdo, "/Status/Level", cm);
 
       Serial.println(cm);
-      specificHumidity = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/Humidity") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
-      // wateringBatchMillis = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/Humidity") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
-      wateringBatchWait = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/WateringBatchWait") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
-      isWateringOn = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/IsEnableWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
-      isInstanceWatering = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/InstantWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      targetHumidity = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/Humidity") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      wateringBatchDurartion = atoi(Firebase.RTDB.getFloat(&fbdo, "/Setting/WateringBatchDurartion") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      canWatering = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/IsEnableWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      isInstantWatering = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/InstantWatering") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      wet = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/Wet") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+      dry = atoi(Firebase.RTDB.getInt(&fbdo, "/Setting/Dry") ? String(fbdo.to<int>()).c_str() : fbdo.errorReason().c_str());
+
      
     }
-    if (isWateringOn == 1) {
-      if (Humidity <= specificHumidity) {
-        digitalWrite(Relay, LOW);
-        Serial.println("Watering On");
-        delay(wateringBatchWait * 1000);
-        digitalWrite(Relay, HIGH);
-        Serial.println("Watering Off");
 
-        delay(10 * 1000);
+
+    if (canWatering == 1) {
+      if (isInstantWatering == 0) {
+        Serial.println("Delaying" + String(millis() - pumpDelayMillis) + " >= " + String(wateringBatchDelay * 1000));
+        if (millis() - pumpDelayMillis >= wateringBatchDelay * 1000) {
+          if (Humidity <= targetHumidity) {
+            if (isWatering == 0) {
+              pumpMillis = millis();
+              isWatering = 1;
+            }
+            Serial.println("Watering");
+            Serial.println("Watering" + String(millis() - pumpMillis) + " <= " + String(wateringBatchDurartion * 1000));
+            setPumpEnable(true);
+            if (millis() - pumpMillis > wateringBatchDurartion * 1000) {
+              setPumpEnable(false);
+              pumpDelayMillis = millis();
+              isWatering = 0;
+              Serial.println("Stop Watering Wait for delay");
+            }
+          }
+        } else {
+          setPumpEnable(false);
+        }
+      } else {
+        if (isWatering == 0) {
+          pumpMillis = millis();
+          isWatering = 1;
+        }
+        Serial.println("Watering");
+        Serial.println("Watering" + String(millis() - pumpMillis) + " <= " + String(wateringBatchDurartion * 1000));
+        setPumpEnable(true);
+        if (millis() - pumpMillis > wateringBatchDurartion * 1000) {
+          setPumpEnable(false);
+          pumpDelayMillis = millis();
+          isWatering = 0;
+          isInstantWatering = 0;
+          Firebase.RTDB.setInt(&fbdo, "/Setting/InstantWatering", 0);
+
+          Serial.println("Stop Watering Wait for delay");
+        }
       }
-      if (isInstanceWatering == 1) {
-        InstanceWatering();
+    } else {
+      if (isInstantWatering == 0) {
+        StopWatering();
+        Serial.println("IsWatering == 0");
+      } else {
+        if (isWatering == 0) {
+          pumpMillis = millis();
+          isWatering = 1;
+        }
+        Serial.println("Watering");
+        Serial.println("Watering" + String(millis() - pumpMillis) + " <= " + String(wateringBatchDurartion * 1000));
+        setPumpEnable(true);
+        if (millis() - pumpMillis > wateringBatchDurartion * 1000) {
+          setPumpEnable(false);
+          pumpDelayMillis = millis();
+          isWatering = 0;
+          isInstantWatering = 0;
+          Firebase.RTDB.setInt(&fbdo, "/Setting/InstantWatering", 0);
+          Serial.println("Stop Watering Wait for delay");
+        }
       }
+      
     }
+
     
 }
 
-void InstanceWatering() {
-    digitalWrite(Relay, LOW);
-    delay(wateringBatchWait * 1000);
-    digitalWrite(Relay, HIGH);
-    isInstanceWatering = 0;
-    Firebase.RTDB.setInt(&fbdo, "/Setting/InstantWatering", 0);
-
-    delay(10 * 1000);
+void StopPumpDelay() {
+  pumpDelayMillis = wateringBatchDelay * 1000;
 }
+
+void Watering() {
+  isWatering = true;
+  StopPumpDelay();
+}
+
+void StopWatering() {
+  isWatering = false;
+  setPumpEnable(false);
+  pumpMillis = 0;
+  pumpDelayMillis = 0;
+}
+
+void setPumpEnable(bool isEnable) {
+  if (isEnable) {
+    digitalWrite(Relay, LOW);
+    Serial.println("Enable Pump");
+  } else {
+    digitalWrite(Relay, HIGH);
+    Serial.println("Disable Pump");
+
+  }
+}
+
 
 float microsecondsToCentimeters(float microseconds)
 {
